@@ -12,12 +12,63 @@ from discord_formatter import DiscordFormatter
 from gif_utils import is_gif_url, is_discord_emoji_url
 import httpx  # For Exa API calls
 
-# Initialize xAI Grok client (OpenAI-compatible)
-xai_client = AsyncOpenAI(
-    base_url=config.xai_base_url,  # 'https://api.x.ai/v1'
-    api_key=config.xai_api_key,
+# Initialize OpenRouter client (OpenAI-compatible)
+openrouter_client = AsyncOpenAI(
+    base_url=config.openrouter_base_url,
+    api_key=config.openrouter_api_key,
     timeout=60.0
 )
+
+llm_client = openrouter_client
+
+POINT_ANALYSIS_TOKEN_LIMITS = (4000, 8000)
+
+
+def _point_analysis_response_format(max_points: int) -> Dict[str, Any]:
+    """Return the strict JSON schema expected from point analysis."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "community_point_analysis",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "awards": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "author_id": {"type": "string"},
+                                "author_name": {"type": "string"},
+                                "points": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 20,
+                                },
+                                "reason": {"type": "string"},
+                            },
+                            "required": [
+                                "author_id",
+                                "author_name",
+                                "points",
+                                "reason",
+                            ],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "total_awarded": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": max_points,
+                    },
+                    "summary": {"type": "string"},
+                },
+                "required": ["awards", "total_awarded", "summary"],
+                "additionalProperties": False,
+            },
+        },
+    }
 
 
 async def call_exa_answer(query: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
@@ -417,6 +468,10 @@ async def call_llm_for_summary(messages, channel_name, date, hours=24):
             message_id = msg.get('id', '')
             guild_id = msg.get('guild_id', '')
             channel_id = msg.get('channel_id', '')
+            message_channel_name = msg.get('channel_name')
+            channel_prefix = ""
+            if message_channel_name and str(message_channel_name).lower() != str(channel_name).lower():
+                channel_prefix = f"#{message_channel_name} | "
 
             # Generate Discord message link
             message_link = ""
@@ -437,9 +492,9 @@ async def call_llm_for_summary(messages, channel_name, date, hours=24):
             timestamp_marker = f" [TIMESTAMP:{discord_timestamp}]" if discord_timestamp else ""
             if message_link:
                 # Format as clickable Discord link that the LLM will understand
-                message_text = f"[{time_str}]{timestamp_marker} {author_name}: {content} [Jump to message]({message_link})"
+                message_text = f"[{time_str}]{timestamp_marker} {channel_prefix}{author_name}: {content} [Jump to message]({message_link})"
             else:
-                message_text = f"[{time_str}]{timestamp_marker} {author_name}: {content}"
+                message_text = f"[{time_str}]{timestamp_marker} {channel_prefix}{author_name}: {content}"
 
             # If there are image descriptions, add them inline to the message
             if image_descriptions:
@@ -488,7 +543,8 @@ async def call_llm_for_summary(messages, channel_name, date, hours=24):
 
         # Create the prompt for the LLM
         time_period = "24 hours" if hours == 24 else f"{hours} hours" if hours != 1 else "1 hour"
-        prompt = f"""Summarize the #{channel_name} channel for the past {time_period}. Extract SIGNAL from noise.
+        summary_subject = "all active channels" if channel_name == "all active channels" else f"#{channel_name} channel"
+        prompt = f"""Summarize {summary_subject} for the past {time_period}. Extract SIGNAL from noise.
 
 PRIORITIZE (in order):
 1. New tech news, product launches, announcements
@@ -505,7 +561,7 @@ Format (be CONCISE - aim for brevity):
 
 ## 🔥 Highlights
 5-8 bullet points MAX. One line each. Start with the topic, not filler words.
-Format: **Topic** - brief context - `username` TIMESTAMP [→](discord_message_link)
+Format: **Topic** - brief context - `username` TIMESTAMP [source](discord_message_link)
 - Messages with timestamps have a [TIMESTAMP:<t:unix:t>] marker. Copy the <t:unix:t> part EXACTLY as the TIMESTAMP in your output when available.
 - These timestamps automatically display in the reader's local timezone. Omit TIMESTAMP if not available.
 Include image descriptions inline if relevant to tech content.
@@ -517,15 +573,15 @@ Format: [Title](link) - why it matters - `username` TIMESTAMP
 
 Skip sections if nothing noteworthy. No fluff. No introductions. Start directly with ## Highlights."""
         
-        logger.info(f"Calling xAI Grok for channel summary: #{channel_name} for the past {time_period}")
+        logger.info(f"Calling OpenRouter model {config.llm_model} for channel summary: #{channel_name} for the past {time_period}")
 
-        # Make the API request with xAI Grok (higher token limit for summaries)
-        completion = await xai_client.chat.completions.create(
-            model=config.grok_model,
+        # Make the API request with OpenRouter (higher token limit for summaries)
+        completion = await llm_client.chat.completions.create(
+            model=config.llm_model,
             messages=[
                 {
                     "role": "system",
-                    "content": "You summarize Discord tech community conversations. Focus on extracting high-signal content: tech news, AI/coding tips, dev tools, hacks, insights. Skip social chatter and small talk. Be extremely concise - one line per bullet point. Use backticks for usernames. Preserve Discord message links as [→](url). CRITICAL: Never use markdown code blocks (```). Use plain text with bold and headers."
+                    "content": "You summarize Discord tech community conversations. Focus on extracting high-signal content: tech news, AI/coding tips, dev tools, hacks, insights. Skip social chatter and small talk. Be extremely concise - one line per bullet point. Use backticks for usernames. Preserve Discord message links as [source](url). CRITICAL: Never use markdown code blocks (```). Use plain text with bold and headers."
                 },
                 {
                     "role": "user",
@@ -545,15 +601,15 @@ Skip sections if nothing noteworthy. No fluff. No introductions. Start directly 
         # Enhance specific sections in the summary
         formatted_summary = DiscordFormatter._enhance_summary_sections(formatted_summary)
 
-        logger.info(f"xAI Grok summary received: {formatted_summary[:50]}{'...' if len(formatted_summary) > 50 else ''}")
+        logger.info(f"OpenRouter summary received: {formatted_summary[:50]}{'...' if len(formatted_summary) > 50 else ''}")
 
         return formatted_summary
 
     except asyncio.TimeoutError:
-        logger.error("xAI Grok request timed out during summary generation")
+        logger.error("OpenRouter request timed out during summary generation")
         return "Sorry, the summary request timed out. Please try again later."
     except Exception as e:
-        logger.error(f"Error calling xAI Grok for summary: {str(e)}", exc_info=True)
+        logger.error(f"Error calling OpenRouter for summary: {str(e)}", exc_info=True)
         return "Sorry, I encountered an error while generating the summary. Please try again later."
 
 async def summarize_url_with_exa(url: str) -> Optional[str]:
@@ -592,7 +648,7 @@ async def summarize_url_with_exa(url: str) -> Optional[str]:
         if summary:
             formatted_response = DiscordFormatter.format_llm_response(summary)
         else:
-            # If no summary, use xAI Grok to summarize the text
+            # If no summary, use OpenRouter to summarize the text
             formatted_response = await summarize_scraped_content(text, url)
 
         logger.info(f"Exa URL summary: {formatted_response[:50] if formatted_response else 'None'}...")
@@ -603,9 +659,9 @@ async def summarize_url_with_exa(url: str) -> Optional[str]:
         return None
 
 
-# Keep old function name as alias for backward compatibility
-async def summarize_url_with_perplexity(url: str) -> Optional[str]:
-    """Deprecated: Use summarize_url_with_exa instead. Kept for backward compatibility."""
+# Summarize a URL with the configured summarization path.
+async def summarize_url_with_llm(url: str) -> Optional[str]:
+    """Summarize a URL using Exa first, then the configured OpenRouter LLM if needed."""
     return await summarize_url_with_exa(url)
 
 
@@ -613,7 +669,7 @@ async def summarize_scraped_content(markdown_content: str, url: str, use_exa: bo
     """
     Summarize scraped content from a URL.
 
-    Can optionally use Exa /contents to re-fetch and summarize, or use xAI Grok
+    Can optionally use Exa /contents to re-fetch and summarize, or use OpenRouter
     to summarize the already-scraped markdown content.
 
     Args:
@@ -636,18 +692,18 @@ async def summarize_scraped_content(markdown_content: str, url: str, use_exa: bo
                 formatted_response = DiscordFormatter.format_llm_response(summary)
                 logger.info(f"Exa summary: {formatted_response[:50]}...")
                 return formatted_response
-            # If Exa didn't return a summary, fall through to xAI Grok
+            # If Exa didn't return a summary, fall through to OpenRouter
 
-        # Use xAI Grok to summarize the markdown content
+        # Use OpenRouter to summarize the markdown content
         # Truncate content if it's too long (to avoid token limits)
         max_content_length = 15000  # Adjust based on model's context window
         truncated_content = markdown_content[:max_content_length]
         if len(markdown_content) > max_content_length:
             truncated_content += "\n\n[Content truncated due to length...]"
 
-        logger.info(f"Summarizing content from URL with xAI Grok: {url}")
+        logger.info(f"Summarizing content from URL with OpenRouter model {config.llm_model}: {url}")
 
-        # Create the prompt for xAI Grok
+        # Create the prompt for OpenRouter
         prompt = f"""Analyze and summarize this content from {url}:
 
 {truncated_content}
@@ -657,9 +713,9 @@ Format your response as plain text with bullet points (use - for bullets).
 Do not include an introductory paragraph or title.
 Keep the summary brief and focused on the most important information."""
 
-        # Make the API request using xAI Grok
-        completion = await xai_client.chat.completions.create(
-            model=config.grok_model,
+        # Make the API request using OpenRouter
+        completion = await llm_client.chat.completions.create(
+            model=config.llm_model,
             messages=[
                 {
                     "role": "system",
@@ -676,7 +732,7 @@ Keep the summary brief and focused on the most important information."""
 
         # Extract the response
         response_text = completion.choices[0].message.content
-        logger.info(f"xAI Grok summary received: {response_text[:50]}{'...' if len(response_text) > 50 else ''}")
+        logger.info(f"OpenRouter summary received: {response_text[:50]}{'...' if len(response_text) > 50 else ''}")
 
         # Clean up the response
         cleaned_response = response_text.strip()
@@ -699,7 +755,7 @@ Keep the summary brief and focused on the most important information."""
         return formatted_response
 
     except asyncio.TimeoutError:
-        logger.error(f"xAI Grok request timed out while summarizing content from URL {url}")
+        logger.error(f"OpenRouter request timed out while summarizing content from URL {url}")
         return None
     except Exception as e:
         logger.error(f"Error summarizing content from URL {url}: {str(e)}", exc_info=True)
@@ -937,31 +993,45 @@ Make sure the JSON is valid and parseable. Only award points to users who made m
                 logger.warning(f"Prompt still exceeds limit after truncation ({len(prompt)} > {max_prompt_length}), hard truncating")
                 prompt = prompt[:max_prompt_length]
 
-        logger.info(f"Calling xAI Grok for point analysis of {len(messages)} messages (prompt length: {len(prompt)} chars)")
+        logger.info(f"Calling OpenRouter model {config.llm_model} for point analysis of {len(messages)} messages (prompt length: {len(prompt)} chars)")
 
-        # Make the API request using xAI Grok
-        completion = await xai_client.chat.completions.create(
-            model=config.grok_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": f"You are an AI that analyzes Discord community contributions and awards points fairly. You have a daily pool of {max_points} points to distribute based on value provided to the community. Be discerning - only award points for genuine contributions. Respond with valid JSON only."
+        request_messages = [
+            {
+                "role": "system",
+                "content": f"You are an AI that analyzes Discord community contributions and awards points fairly. You have a daily pool of {max_points} points to distribute based on value provided to the community. Be discerning - only award points for genuine contributions. Respond with valid JSON only."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+
+        result = None
+        for attempt, token_limit in enumerate(POINT_ANALYSIS_TOKEN_LIMITS, start=1):
+            # Point analysis needs more output headroom than ordinary summaries.
+            # Strict structured output prevents markdown or malformed field shapes,
+            # while low reasoning effort reserves most of the budget for the JSON.
+            completion = await llm_client.chat.completions.create(
+                model=config.llm_model,
+                messages=request_messages,
+                response_format=_point_analysis_response_format(max_points),
+                max_tokens=token_limit,
+                temperature=0.3,
+                extra_body={
+                    "provider": {"require_parameters": True},
+                    "reasoning": {"effort": "low", "exclude": True},
                 },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            max_tokens=1500,
-            temperature=0.3  # Lower temperature for more consistent analysis
-        )
+            )
 
-        # Extract the response
-        response_text = completion.choices[0].message.content
-        logger.info(f"xAI Grok point analysis received: {response_text[:100]}...")
+            choice = completion.choices[0]
+            response_text = choice.message.content or ""
+            finish_reason = getattr(choice, "finish_reason", None)
+            logger.info(
+                "OpenRouter point analysis received "
+                f"(attempt {attempt}, finish_reason={finish_reason}, "
+                f"response_length={len(response_text)}): {response_text[:100]}..."
+            )
 
-        # Parse the JSON response
-        try:
             # Find JSON between triple backticks if present
             if "```json" in response_text and "```" in response_text.split("```json", 1)[1]:
                 json_str = response_text.split("```json", 1)[1].split("```", 1)[0].strip()
@@ -971,9 +1041,28 @@ Make sure the JSON is valid and parseable. Only award points to users who made m
                 # If no backticks, try to parse the whole response
                 json_str = response_text.strip()
 
-            # Parse the JSON
-            result = json.loads(json_str)
+            try:
+                result = json.loads(json_str)
+                break
+            except json.JSONDecodeError as e:
+                logger.error(
+                    "Failed to parse JSON from LLM point analysis "
+                    f"(attempt {attempt}, finish_reason={finish_reason}, "
+                    f"token_limit={token_limit}): {e}"
+                )
+                logger.error(f"Raw response: {response_text}")
+                if attempt < len(POINT_ANALYSIS_TOKEN_LIMITS):
+                    logger.warning(
+                        "Retrying point analysis with a larger output token limit"
+                    )
 
+        if result is None:
+            return {
+                'awards': [],
+                'summary': 'Failed to analyze messages for points due to parsing error.'
+            }
+
+        try:
             # Validate structure
             if "awards" not in result:
                 logger.warning(f"LLM response missing 'awards' field: {result}")
@@ -1112,9 +1201,8 @@ Make sure the JSON is valid and parseable. Only award points to users who made m
             logger.info(f"Successfully parsed point awards: {len(result['awards'])} users, {result.get('total_awarded', 0)} total points (after anti-gaming mitigations)")
             return result
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON from LLM point analysis: {e}", exc_info=True)
-            logger.error(f"Raw response: {response_text}")
+        except (AttributeError, TypeError) as e:
+            logger.error(f"Invalid structured point analysis response: {e}", exc_info=True)
             return {
                 'awards': [],
                 'summary': 'Failed to analyze messages for points due to parsing error.'
@@ -1135,7 +1223,7 @@ async def call_llm_with_database_context(
 ) -> str:
     """
     Answer a question using context from database messages.
-    Uses xAI Grok for LLM processing.
+    Uses OpenRouter for LLM processing.
 
     Args:
         query: The user's question
@@ -1146,7 +1234,7 @@ async def call_llm_with_database_context(
         str: The LLM's response
     """
     try:
-        logger.info(f"Calling xAI Grok with database context for query: {query[:50]}...")
+        logger.info(f"Calling OpenRouter model {config.llm_model} with database context for query: {query[:50]}...")
 
         # Format the messages as context
         if not messages:
@@ -1217,9 +1305,9 @@ Instructions:
 - Be concise and direct
 - If multiple people discussed the topic, summarize their different perspectives"""
 
-        # Use xAI Grok for database context queries
-        completion = await xai_client.chat.completions.create(
-            model=config.grok_model,
+        # Use OpenRouter for database context queries
+        completion = await llm_client.chat.completions.create(
+            model=config.llm_model,
             messages=[
                 {
                     "role": "system",
@@ -1237,13 +1325,13 @@ Instructions:
         response = completion.choices[0].message.content
 
         formatted_response = DiscordFormatter.format_llm_response(response)
-        logger.info(f"xAI Grok database context query answered successfully")
+        logger.info("OpenRouter database context query answered successfully")
 
         return formatted_response
 
     except asyncio.TimeoutError:
-        logger.error("xAI Grok request timed out during database context query")
+        logger.error("OpenRouter request timed out during database context query")
         return "Sorry, the request timed out. Please try again."
     except Exception as e:
-        logger.error(f"Error answering query with xAI Grok database context: {str(e)}", exc_info=True)
+        logger.error(f"Error answering query with OpenRouter database context: {str(e)}", exc_info=True)
         return "Sorry, an error occurred while processing your question."

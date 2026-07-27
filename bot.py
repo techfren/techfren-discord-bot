@@ -4,6 +4,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import asyncio
+import fcntl
 import re
 import time
 from urllib.parse import urlparse
@@ -15,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 import database
 from logging_config import logger  # Import the logger from the new module
 from rate_limiter import check_rate_limit, update_rate_limit_config  # Import rate limiting functions
-from llm_handler import call_llm_api, call_llm_for_summary, summarize_scraped_content, summarize_url_with_perplexity, call_llm_with_database_context  # Import LLM functions
+from llm_handler import call_llm_api, call_llm_for_summary, summarize_scraped_content, summarize_url_with_llm, call_llm_with_database_context  # Import LLM functions
 from message_utils import split_long_message, fetch_referenced_message, is_discord_message_link  # Import message utility functions
 from youtube_handler import is_youtube_url, scrape_youtube_content  # Import YouTube functions
 from summarization_tasks import daily_channel_summarization, set_discord_client, before_daily_summarization, daily_role_color_charging  # Import summarization tasks
@@ -32,6 +33,23 @@ GIF_WARNING_DELETE_DELAY = 30  # seconds before deleting warning messages
 
 # Track users who have been warned about GIF limits (user_id -> expiry_time)
 _gif_warned_users = {}
+
+_instance_lock_file = None
+
+
+def acquire_single_instance_lock(lock_path: str = "/tmp/techfren-discord-bot.lock") -> bool:
+    """Return True after acquiring the bot process lock, False if another copy is running."""
+    global _instance_lock_file
+
+    _instance_lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(_instance_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+
+    _instance_lock_file.write(str(os.getpid()))
+    _instance_lock_file.flush()
+    return True
 
 
 
@@ -85,6 +103,22 @@ def message_contains_gif(message: discord.Message) -> bool:
             if obj and is_gif_url(str(obj)):
                 return True
 
+    return False
+
+
+def _member_has_free_weekly_color_change_role(member: discord.Member) -> bool:
+    """
+    Check whether a member has an eligible role for free weekly color changes.
+    Role matching is case-insensitive and uses keyword matching against role names.
+    """
+    keywords = getattr(config, 'ROLE_COLOR_FREE_CHANGE_ROLE_KEYWORDS', ())
+    if not keywords:
+        return False
+
+    for role in member.roles:
+        role_name = role.name.lower()
+        if any(keyword in role_name for keyword in keywords):
+            return True
     return False
 
 # Using message_content intent (requires enabling in the Discord Developer Portal)
@@ -472,7 +506,7 @@ async def handle_x_post_summary(message: discord.Message) -> bool:
 
 async def handle_link_summary(message: discord.Message) -> bool:
     """
-    Automatically detect non-X/Twitter URLs in messages, summarize them using Perplexity directly,
+    Automatically detect non-X/Twitter URLs in messages, summarize them using the configured LLM,
     and reply to the message with the summary.
 
     When a message contains multiple links, all summaries are combined into a single thread
@@ -531,9 +565,9 @@ async def handle_link_summary(message: discord.Message) -> bool:
         url_summaries = []
         for url in regular_urls:
             try:
-                # Summarize the URL directly using Perplexity
-                logger.info(f"Starting to summarize URL with Perplexity: {url}")
-                summary_text = await summarize_url_with_perplexity(url)
+                # Summarize the URL using the configured LLM
+                logger.info(f"Starting to summarize URL with configured LLM: {url}")
+                summary_text = await summarize_url_with_llm(url)
 
                 if summary_text:
                     url_summaries.append((url, summary_text))
@@ -1292,7 +1326,7 @@ _summarized_message_ids = {}
 _SUMMARIZED_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 
 # Track messages currently being processed to prevent race conditions
-# This prevents duplicate summarizations when multiple 👍 events arrive close together
+# This prevents duplicate summarizations when multiple 🔍 events arrive close together
 _processing_message_ids = set()
 
 
@@ -1357,11 +1391,11 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     Using on_raw_reaction_add instead of on_reaction_add ensures this works
     for messages not in the bot's cache (e.g., older messages or after restart).
 
-    Links are summarized when a thumbs up (👍) reaction is added to a message containing links.
+    Links are summarized when a magnifying glass (🔍) reaction is added to a message containing links.
     This ensures only community-approved links are summarized.
     """
-    # Only process thumbs up reactions
-    if str(payload.emoji) != '👍':
+    # Only process magnifying glass reactions
+    if str(payload.emoji) != '🔍':
         return
 
     # Skip if already successfully processed this message
@@ -1395,20 +1429,20 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if not urls:
         return
 
-    # Count thumbs up reactions
-    thumbs_up_count = 0
+    # Count magnifying glass reactions
+    mag_count = 0
     for r in message.reactions:
-        if str(r.emoji) == '👍':
-            thumbs_up_count = r.count
+        if str(r.emoji) == '🔍':
+            mag_count = r.count
             break
 
-    # Check trigger condition: 1+ thumbs up reaction
-    community_triggered = thumbs_up_count >= 1
+    # Check trigger condition: 1+ magnifying glass reaction
+    community_triggered = mag_count >= 1
 
     if not community_triggered:
         return
 
-    trigger_reason = f"{thumbs_up_count} thumbs up"
+    trigger_reason = f"{mag_count} mag reaction(s)"
     logger.info(f"Link summarization triggered by {trigger_reason} for message {message.id}")
 
     # Mark as processing to prevent race conditions from concurrent reaction events
@@ -2073,6 +2107,10 @@ async def color_set_slash(interaction: discord.Interaction, color: str):
     """
     import config
 
+    free_change_used = False
+    free_change_prev_ts: Optional[str] = None
+    color_change_successful = False
+
     try:
         # Validate guild context
         if not interaction.guild:
@@ -2101,12 +2139,37 @@ async def color_set_slash(interaction: discord.Interaction, color: str):
 
         color_hex = available_colors[color_lower]
         points_per_day = getattr(config, 'ROLE_COLOR_POINTS_PER_DAY', 1)
+        points_to_charge_now = points_per_day
 
-        # Check if user has enough points
-        current_points = database.get_user_points(user_id, guild_id)
-        if current_points < points_per_day:
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            member = interaction.guild.get_member(interaction.user.id)
+
+        if not member:
             await interaction.response.send_message(
-                f"You need at least {points_per_day} points to set a color. You have {current_points} points.",
+                "Could not find you in this server.",
+                ephemeral=True
+            )
+            return
+
+        free_change_eligible = _member_has_free_weekly_color_change_role(member)
+        free_change_cooldown_days = getattr(config, 'ROLE_COLOR_FREE_CHANGE_COOLDOWN_DAYS', 7)
+
+        if free_change_eligible:
+            claimed, free_change_prev_ts = database.claim_free_role_color_change_with_rollback(
+                user_id, guild_id, free_change_cooldown_days
+            )
+            if claimed:
+                points_to_charge_now = 0
+                free_change_used = True
+
+        # Check if user has enough points for this color change
+        current_points = database.get_user_points(user_id, guild_id)
+        if current_points < points_to_charge_now:
+            if free_change_used:
+                database.rollback_free_role_color_change(user_id, guild_id, free_change_prev_ts)
+            await interaction.response.send_message(
+                f"You need at least {points_to_charge_now} points to set a color. You have {current_points} points.",
                 ephemeral=True
             )
             return
@@ -2115,23 +2178,14 @@ async def color_set_slash(interaction: discord.Interaction, color: str):
         await interaction.response.defer(ephemeral=True)
 
         # Get or create the color role
-        member = interaction.user
-        if not isinstance(member, discord.Member):
-            member = interaction.guild.get_member(interaction.user.id)
-
-        if not member:
-            await interaction.followup.send(
-                "Could not find you in this server.",
-                ephemeral=True
-            )
-            return
-
         # Check if user already has an active color (will remove old role after success)
         existing_color = database.get_user_role_color(user_id, guild_id)
 
         role = await get_or_create_color_role(interaction.guild, color_lower, color_hex)
 
         if not role:
+            if free_change_used:
+                database.rollback_free_role_color_change(user_id, guild_id, free_change_prev_ts)
             await interaction.followup.send(
                 "Failed to create color role. The bot may not have permission to manage roles.",
                 ephemeral=True
@@ -2140,9 +2194,11 @@ async def color_set_slash(interaction: discord.Interaction, color: str):
 
         # Assign the role to the user
         try:
-            await member.add_roles(role, reason=f"Custom color set via /color-set")
+            await member.add_roles(role, reason="Custom color set via /color-set")
             logger.info(f"Assigned role {role.name} (position {role.position}) to {member.name}")
-        except discord.Forbidden:
+        except (discord.Forbidden, discord.HTTPException):
+            if free_change_used:
+                database.rollback_free_role_color_change(user_id, guild_id, free_change_prev_ts)
             await interaction.followup.send(
                 "Failed to assign the role. The bot may not have permission or the role is higher than the bot's highest role.",
                 ephemeral=True
@@ -2150,16 +2206,23 @@ async def color_set_slash(interaction: discord.Interaction, color: str):
             return
 
         # Deduct points for the first day
-        if not database.deduct_user_points(user_id, guild_id, points_per_day):
-            # Rollback - remove role if points deduction failed
-            await member.remove_roles(role, reason="Points deduction failed")
-            await interaction.followup.send(
-                "Failed to deduct points. Please try again.",
-                ephemeral=True
-            )
-            return
+        if points_to_charge_now > 0:
+            if not database.deduct_user_points(user_id, guild_id, points_to_charge_now):
+                # Rollback - remove role if points deduction failed
+                await member.remove_roles(role, reason="Points deduction failed")
+                if free_change_used:
+                    database.rollback_free_role_color_change(user_id, guild_id, free_change_prev_ts)
+                await interaction.followup.send(
+                    "Failed to deduct points. Please try again.",
+                    ephemeral=True
+                )
+                return
 
         # Save to database
+        free_change_started_at = None
+        if free_change_used:
+            free_change_started_at = datetime.now(timezone.utc).isoformat()
+
         if not database.set_user_role_color(
             author_id=user_id,
             author_name=user_name,
@@ -2167,16 +2230,27 @@ async def color_set_slash(interaction: discord.Interaction, color: str):
             role_id=str(role.id),
             color_hex=color_hex,
             color_name=color_lower,
-            points_per_day=points_per_day
+            points_per_day=points_per_day,
+            free_change_started_at=free_change_started_at
         ):
             # Rollback - remove role and refund points if DB write failed
             await member.remove_roles(role, reason="Database write failed - rollback")
-            database.award_points_to_user(user_id, user_name, guild_id, points_per_day)
+            if points_to_charge_now > 0:
+                database.award_points_to_user(user_id, user_name, guild_id, points_to_charge_now)
+            if free_change_used:
+                database.rollback_free_role_color_change(user_id, guild_id, free_change_prev_ts)
             await interaction.followup.send(
                 "Failed to save color settings. Your points have been refunded. Please try again.",
                 ephemeral=True
             )
             return
+
+        if free_change_used:
+            logger.info(f"Free role color change claimed for {user_name} ({user_id})")
+
+        # Mark as successful immediately after DB commit so later UI/role cleanup
+        # errors don't roll back the free claim.
+        color_change_successful = True
 
         # After all steps succeed, remove old role if user had one (but not if same role)
         if existing_color:
@@ -2191,12 +2265,22 @@ async def color_set_slash(interaction: discord.Interaction, color: str):
                         # Can't remove old role (may be higher than bot's role), but new color is set
                         logger.warning(f"Could not remove old color role {old_role.name} from {user_name} - insufficient permissions")
 
-        remaining_points = current_points - points_per_day
+        remaining_points = current_points - points_to_charge_now
+        if not free_change_used:
+            upfront_cost_text = f"Cost right now: {points_to_charge_now} point(s)"
+            daily_cost_text = f"Daily cost: {points_per_day} point(s) per day"
+            remove_hint = "Use `/color-remove` to remove your color and stop the daily charge."
+        else:
+            cooldown_label = f"{free_change_cooldown_days} day(s)" if free_change_cooldown_days != 7 else "weekly"
+            upfront_cost_text = f"Cost right now: 0 point(s) (free {cooldown_label} change for eligible role)"
+            daily_cost_text = f"Daily cost: 0 points during your free {cooldown_label} period"
+            remove_hint = f"Use `/color-remove` to remove your color. The free period lasts {cooldown_label}."
         await interaction.followup.send(
             f"Your name color has been set to **{color_lower}**!\n"
-            f"Cost: {points_per_day} point(s) per day\n"
+            f"{upfront_cost_text}\n"
+            f"{daily_cost_text}\n"
             f"Remaining points: {remaining_points}\n\n"
-            f"Use `/color-remove` to remove your color and stop the daily charge.",
+            f"{remove_hint}",
             ephemeral=True
         )
 
@@ -2204,6 +2288,11 @@ async def color_set_slash(interaction: discord.Interaction, color: str):
 
     except Exception as e:
         logger.error(f"Error in /color-set command: {str(e)}", exc_info=True)
+        if free_change_used and not color_change_successful:
+            try:
+                database.rollback_free_role_color_change(user_id, guild_id, free_change_prev_ts)
+            except Exception:
+                pass
         try:
             await interaction.followup.send(
                 "An error occurred while setting your color. Please try again later.",
@@ -2414,6 +2503,14 @@ try:
     # Validate configuration using the imported function
     validate_config(config)
 
+    lock_path = os.getenv("BOT_INSTANCE_LOCK_PATH", "/tmp/techfren-discord-bot.lock")
+    if not acquire_single_instance_lock(lock_path):
+        logger.critical(
+            "Another techfren Discord bot process is already running "
+            f"(lock held at {lock_path}). Exiting to avoid duplicate Discord events."
+        )
+        raise SystemExit(1)
+
     # Log startup (but mask the actual token)
     token_preview = config.token[:5] + "..." + config.token[-5:] if len(config.token) > 10 else "***masked***"
     logger.info(f"Bot token loaded: {token_preview}")
@@ -2429,3 +2526,64 @@ except discord.LoginFailure:
     logger.critical("Invalid Discord token. Please check your token in config.py", exc_info=True)
 except Exception as e:
     logger.critical(f"Unexpected error during bot startup: {e}", exc_info=True)
+
+
+@bot.tree.command(name="ask-fred", description="Ask Fred a question (costs 1 point)")
+async def ask_fred_command(interaction: discord.Interaction, prompt: str):
+    """
+    Slash command to ask Fred/Hermes a question.
+    Costs 1 point and returns Hermes's response in a thread.
+
+    Args:
+        interaction: The Discord interaction
+        prompt: The question/prompt to send to Hermes
+    """
+    try:
+        if not prompt.strip():
+            await interaction.response.send_message("Please provide a prompt for Fred.", ephemeral=True)
+            return
+
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        user_id = str(interaction.user.id)
+        guild_id = str(interaction.guild.id)
+        prompt_text = prompt.strip()
+
+        points_before = database.get_user_points(user_id, guild_id)
+        if points_before < 1:
+            await interaction.response.send_message(
+                f"You need 1 point to ask Fred, but you only have {points_before} points.",
+                ephemeral=True
+            )
+            return
+
+        success = database.deduct_user_points(user_id, guild_id, 1)
+        if not success:
+            remaining = database.get_user_points(user_id, guild_id)
+            await interaction.response.send_message(
+                f"Point deduction failed. You have {remaining} points.",
+                ephemeral=True
+            )
+            return
+
+        thinking_message = await interaction.channel.send("Fred is thinking…")
+        thread = None
+        try:
+            thread = await thinking_message.create_thread(name=f"Fred - {interaction.user.display_name}", auto_archive_duration=1440)
+            try:
+                await thread.join()
+            except Exception:
+                pass
+        except discord.errors.HTTPException as e:
+            if e.code != 160004:
+                logger.error(f"ask-fred thread creation failed: {e}")
+
+        target = thread or interaction.channel
+        await target.send(f"{interaction.user.mention} asked:\\n{prompt_text}")
+        logger.info(f"User {interaction.user.name} ({user_id}) used /ask-fred in guild {guild_id}; prompt_len={len(prompt_text)}")
+
+    except Exception as e:
+        logger.error(f"Error in /ask-fred command: {str(e)}", exc_info=True)
+        await interaction.response.send_message("An error occurred. Please try again later.", ephemeral=True)

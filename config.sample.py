@@ -11,10 +11,11 @@
 #
 # Environment variable names:
 # DISCORD_BOT_TOKEN=your_discord_bot_token
-# PERPLEXITY_API_KEY=your_perplexity_api_key
+# OPENROUTER_API_KEY=your_openrouter_api_key
 # FIRECRAWL_API_KEY=your_firecrawl_api_key
 # APIFY_API_TOKEN=your_apify_api_token
-# LLM_MODEL=sonar
+# LLM_MODEL=deepseek/deepseek-v4-flash
+# ROLE_COLOR_DAILY_CHARGE_EXEMPT_ROLE_KEYWORDS=legend,mvp
 # RATE_LIMIT_SECONDS=10
 # MAX_REQUESTS_PER_MINUTE=6
 # SUMMARY_HOUR=0
@@ -30,13 +31,14 @@
 # Environment variable: DISCORD_BOT_TOKEN
 token = "YOUR_DISCORD_BOT_TOKEN"
 
-# Perplexity API Key (required)
-# Environment variable: PERPLEXITY_API_KEY
-perplexity = "YOUR_PERPLEXITY_API_KEY"
+# OpenRouter API Key (required)
+# Environment variable: OPENROUTER_API_KEY
+openrouter_api_key = "YOUR_OPENROUTER_API_KEY"
 
-# LLM Model Configuration (optional)
-# Environment variable: LLM_MODEL
-llm_model = "sonar"
+# OpenRouter Model Configuration (optional)
+# Environment variables: OPENROUTER_BASE_URL, LLM_MODEL
+openrouter_base_url = "https://openrouter.ai/api/v1"
+llm_model = "deepseek/deepseek-v4-flash"
 
 # Rate Limiting Configuration (optional)
 # Environment variables: RATE_LIMIT_SECONDS, MAX_REQUESTS_PER_MINUTE
@@ -56,5 +58,5 @@ apify_api_token = "YOUR_APIFY_API_TOKEN"
 summary_hour = 0
 summary_minute = 0
 reports_channel_id = "YOUR_CHANNEL_ID"  # For channel summaries
-general_channel_id = "YOUR_GENERAL_CHANNEL_ID"  # For daily point awards
-summary_channel_ids = ["YOUR_CHANNEL_ID_1", "YOUR_CHANNEL_ID_2"]  # Optional: restrict summaries to specific channels
+general_channel_id = "YOUR_GENERAL_CHANNEL_ID"  # For the server-wide daily digest and point awards
+summary_channel_ids = ["YOUR_CHANNEL_ID_1", "YOUR_CHANNEL_ID_2"]  # Optional: restrict per-channel summaries

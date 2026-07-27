@@ -4,7 +4,7 @@ A simple Discord bot built with discord.py.
 
 ## Features
 
-- Processes queries via mentions (`@botname <query>`) anywhere in messages and responds with AI-generated answers using Perplexity API
+- Processes queries via mentions (`@botname <query>`) anywhere in messages and responds with AI-generated answers using OpenRouter by default
 - Summarizes channel conversations with `/sum-day` command to get a summary of the day's messages
 - Summarizes channel conversations with `/sum-hr <hours>` command to get a summary of the past N hours
 - Automatically generates daily summaries for all active channels at a scheduled time
@@ -51,7 +51,7 @@ A simple Discord bot built with discord.py.
    **Option B: Set environment variables directly**
    ```bash
    export DISCORD_BOT_TOKEN="YOUR_DISCORD_BOT_TOKEN"
-   export PERPLEXITY_API_KEY="YOUR_PERPLEXITY_API_KEY"
+   export OPENROUTER_API_KEY="YOUR_OPENROUTER_API_KEY"
    export FIRECRAWL_API_KEY="YOUR_FIRECRAWL_API_KEY"
    # ... other variables as needed
    ```
@@ -59,24 +59,24 @@ A simple Discord bot built with discord.py.
    **Required environment variables:**
    ```bash
    DISCORD_BOT_TOKEN=your_discord_bot_token
-   PERPLEXITY_API_KEY=your_perplexity_api_key
+   OPENROUTER_API_KEY=your_openrouter_api_key
    FIRECRAWL_API_KEY=your_firecrawl_api_key
    ```
 
    **Optional environment variables:**
    ```bash
-   LLM_MODEL=sonar  # Default model to use (Perplexity's web search model)
+   LLM_MODEL=deepseek/deepseek-v4-flash  # Default OpenRouter model
    APIFY_API_TOKEN=your_apify_token  # For Twitter/X.com link processing
    RATE_LIMIT_SECONDS=10  # Time between allowed requests per user
    MAX_REQUESTS_PER_MINUTE=6  # Maximum requests per user per minute
    SUMMARY_HOUR=0  # Hour of the day to run summarization (UTC, 0-23)
    SUMMARY_MINUTE=0  # Minute of the hour to run summarization (0-59)
    SUMMARY_CHANNEL_IDS=channel_id1,channel_id2  # Optional: restrict daily summaries to these channels (comma-separated)
-   PERPLEXITY_BASE_URL=https://api.perplexity.ai  # Base URL for Perplexity API
+   OPENROUTER_BASE_URL=https://openrouter.ai/api/v1  # Base URL for OpenRouter API
    HTTP_REFERER=https://techfren.net  # HTTP Referer header for API requests
    X_TITLE=TechFren Discord Bot  # X-Title header for API requests
    ```
-   - You can get a Perplexity API key by signing up at [Perplexity.ai](https://perplexity.ai/)
+   - You can get an OpenRouter API key by signing up at [OpenRouter.ai](https://openrouter.ai/)
    - You can get a Firecrawl API key by signing up at [Firecrawl.dev](https://firecrawl.dev)
    - You can get an Apify API token by signing up at [Apify.com](https://apify.com)
 6. Run the bot:
@@ -100,7 +100,7 @@ To use the message content intent, you need to enable it in the Discord Develope
 
 ### Basic Commands
 
-- `@botname <query>`: Sends your query to an AI model via Perplexity and returns the response. This command works in any channel and creates a thread attached to your message where the bot's response is posted. The mention can appear anywhere in your message (e.g., "Hey everyone, @botname can you help with this?").
+- `@botname <query>`: Sends your query to the configured AI model and returns the response. This command works in any channel and creates a thread attached to your message where the bot's response is posted. The mention can appear anywhere in your message (e.g., "Hey everyone, @botname can you help with this?").
 
 ### Channel Summarization
 
@@ -125,6 +125,7 @@ The bot automatically generates summaries for all active channels once per day:
 
 - Runs at a configurable time (default: midnight UTC)
 - Summarizes messages from the past 24 hours for each active channel
+- The summary posted in the configured general channel is a server-wide digest of all active channels
 - Stores summaries in a dedicated database table with metadata including:
   - Channel information
   - Message count
@@ -140,7 +141,7 @@ To configure the automated summarization:
 # In .env file or environment variables
 SUMMARY_HOUR=0  # Hour of the day to run summarization (UTC, 0-23)
 SUMMARY_MINUTE=0  # Minute of the hour to run summarization (0-59)
-SUMMARY_CHANNEL_IDS=CHANNEL_ID_1,CHANNEL_ID_2  # Optional: restrict daily summaries to specific channels (comma-separated)
+SUMMARY_CHANNEL_IDS=CHANNEL_ID_1,CHANNEL_ID_2  # Optional: restrict per-channel daily summaries (general digest still uses all active channels)
 ```
 
 ## Database

@@ -19,7 +19,7 @@ if not token:
     raise ValueError("DISCORD_BOT_TOKEN environment variable is required")
 
 # =============================================================================
-# PRIMARY API CONFIGURATION (Exa + xAI Grok)
+# PRIMARY API CONFIGURATION (Exa + OpenRouter)
 # =============================================================================
 
 # Exa API Key (required for Exa search - primary search provider)
@@ -32,33 +32,24 @@ if not exa_api_key:
 # Environment variable: EXA_BASE_URL
 exa_base_url = os.getenv('EXA_BASE_URL', 'https://api.exa.ai')
 
-# xAI Grok API Key (required for Grok LLM - primary LLM provider)
-# Environment variable: XAI_API_KEY
-xai_api_key = os.getenv('XAI_API_KEY')
-if not xai_api_key:
-    raise ValueError("XAI_API_KEY environment variable is required")
+# OpenRouter API Key (required for primary LLM provider)
+# Environment variable: OPENROUTER_API_KEY
+openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
+if not openrouter_api_key:
+    raise ValueError("OPENROUTER_API_KEY environment variable is required")
 
-# xAI Grok API Base URL
-# Environment variable: XAI_BASE_URL
-xai_base_url = os.getenv('XAI_BASE_URL', 'https://api.x.ai/v1')
+# OpenRouter OpenAI-compatible API Base URL
+# Environment variable: OPENROUTER_BASE_URL
+openrouter_base_url = os.getenv('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1')
 
-# Grok Model Configuration
-# Environment variable: GROK_MODEL
-# Default model is "grok-4-1-fast-non-reasoning" for non-reasoning tasks
-grok_model = os.getenv('GROK_MODEL', 'grok-4-1-fast-non-reasoning')
-
-# =============================================================================
-# FALLBACK API CONFIGURATION (Perplexity)
-# =============================================================================
-
-# Perplexity API Key (optional - fallback provider)
-# Environment variable: PERPLEXITY_API_KEY
-perplexity = os.getenv('PERPLEXITY_API_KEY')
-
-# LLM Model Configuration (optional)
+# LLM Model Configuration
 # Environment variable: LLM_MODEL
-# Default model is "sonar" for Perplexity
-llm_model = os.getenv('LLM_MODEL', 'sonar')
+llm_model = os.getenv('LLM_MODEL', 'deepseek/deepseek-v4-flash')
+
+# Optional xAI settings are kept only for features that still explicitly need xAI.
+xai_api_key = os.getenv('XAI_API_KEY')
+xai_base_url = os.getenv('XAI_BASE_URL', 'https://api.x.ai/v1')
+grok_model = os.getenv('GROK_MODEL', 'grok-4-1-fast-non-reasoning')
 
 # Rate Limiting Configuration (optional)
 # Environment variables: RATE_LIMIT_SECONDS, MAX_REQUESTS_PER_MINUTE
@@ -83,7 +74,7 @@ firecrawl_timeout_ms = int(os.getenv('FIRECRAWL_TIMEOUT_MS', '900000'))
 # If not provided, Twitter/X.com links will be processed using Firecrawl
 apify_api_token = os.getenv('APIFY_API_TOKEN')
 
-# NOTE: xai_api_key is already defined above in the PRIMARY API CONFIGURATION section
+# NOTE: xai_api_key is optional and only used by xAI-specific features
 
 
 # Daily Summary Configuration (optional)
@@ -94,7 +85,8 @@ summary_minute = int(os.getenv('SUMMARY_MINUTE', '0'))
 reports_channel_id = os.getenv('REPORTS_CHANNEL_ID')
 general_channel_id = os.getenv('GENERAL_CHANNEL_ID')
 
-# Optional: restrict daily summaries to specific channel IDs (comma-separated list of IDs)
+# Optional: restrict per-channel daily summaries to specific channel IDs (comma-separated list of IDs).
+# The daily summary posted in GENERAL_CHANNEL_ID still uses all active channels as a server-wide digest.
 _summary_channel_ids_raw = os.getenv('SUMMARY_CHANNEL_IDS')
 if _summary_channel_ids_raw:
     summary_channel_ids = [cid.strip() for cid in _summary_channel_ids_raw.split(',') if cid.strip()]
@@ -105,11 +97,6 @@ else:
 # Environment variable: LINKS_DUMP_CHANNEL_ID
 # Channel where only links are allowed - text messages will be auto-deleted
 links_dump_channel_id = os.getenv('LINKS_DUMP_CHANNEL_ID')
-
-# LLM API Configuration (optional)
-# Environment variable: PERPLEXITY_BASE_URL
-# Base URL for Perplexity API (or compatible API)
-perplexity_base_url = os.getenv('PERPLEXITY_BASE_URL', 'https://api.perplexity.ai')
 
 # HTTP Headers Configuration (optional)
 # Environment variables: HTTP_REFERER, X_TITLE
@@ -146,6 +133,35 @@ try:
         ROLE_COLOR_POINTS_PER_DAY = 1  # Minimum 1 point per day
 except (ValueError, TypeError):
     ROLE_COLOR_POINTS_PER_DAY = 1  # Default to 1 if invalid value
+
+# Role names/keywords eligible for one free color change per cooldown window
+# Comma-separated list, matched case-insensitively against Discord role names
+_free_role_keywords_raw = os.getenv('ROLE_COLOR_FREE_CHANGE_ROLE_KEYWORDS', 'legend,mvp')
+ROLE_COLOR_FREE_CHANGE_ROLE_KEYWORDS = tuple(
+    keyword.strip().lower()
+    for keyword in _free_role_keywords_raw.split(',')
+    if keyword.strip()
+)
+
+# Role names/keywords exempt from daily color-role point charges.
+# Defaults to the same special roles that get free color changes.
+_daily_charge_exempt_role_keywords_raw = os.getenv(
+    'ROLE_COLOR_DAILY_CHARGE_EXEMPT_ROLE_KEYWORDS',
+    _free_role_keywords_raw
+)
+ROLE_COLOR_DAILY_CHARGE_EXEMPT_ROLE_KEYWORDS = tuple(
+    keyword.strip().lower()
+    for keyword in _daily_charge_exempt_role_keywords_raw.split(',')
+    if keyword.strip()
+)
+
+# Cooldown in days for free role color changes
+try:
+    ROLE_COLOR_FREE_CHANGE_COOLDOWN_DAYS = int(os.getenv('ROLE_COLOR_FREE_CHANGE_COOLDOWN_DAYS', '7'))
+    if ROLE_COLOR_FREE_CHANGE_COOLDOWN_DAYS < 1:
+        ROLE_COLOR_FREE_CHANGE_COOLDOWN_DAYS = 7
+except (ValueError, TypeError):
+    ROLE_COLOR_FREE_CHANGE_COOLDOWN_DAYS = 7
 
 # GIF Bypass Configuration
 # Points required to bypass GIF rate limits

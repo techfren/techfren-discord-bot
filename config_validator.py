@@ -23,14 +23,14 @@ def validate_config(config_module):
         # This is a warning, not a critical error, as token length can vary.
         logger.warning("Discord token in config.py appears to be invalid (too short or not a string).")
 
-    # Check Perplexity API key
-    if not hasattr(config_module, 'perplexity') or not config_module.perplexity:
-        logger.error("Perplexity API key not found in config.py or is empty")
-        raise ValueError("Perplexity API key is missing or empty in config.py")
+    # Check OpenRouter API key
+    if not hasattr(config_module, 'openrouter_api_key') or not config_module.openrouter_api_key:
+        logger.error("OpenRouter API key not found in config.py or is empty")
+        raise ValueError("OpenRouter API key is missing or empty in config.py")
 
-    if not isinstance(config_module.perplexity, str) or len(config_module.perplexity) < 20:
+    if not isinstance(config_module.openrouter_api_key, str) or len(config_module.openrouter_api_key) < 10:
         # This is a warning.
-        logger.warning("Perplexity API key in config.py appears to be invalid (too short or not a string).")
+        logger.warning("OpenRouter API key in config.py appears to be invalid (too short or not a string).")
         
     # Check Firecrawl API key
     if not hasattr(config_module, 'firecrawl_api_key') or not config_module.firecrawl_api_key:
@@ -79,9 +79,9 @@ def validate_config(config_module):
     # Check for optional LLM model
     if hasattr(config_module, 'llm_model') and config_module.llm_model:
         if isinstance(config_module.llm_model, str) and len(config_module.llm_model.strip()) > 0:
-            logger.info(f"Using custom LLM model from config: {config_module.llm_model}")
+            logger.info(f"Using OpenRouter LLM model from config: {config_module.llm_model}")
         else:
-            logger.warning(f"llm_model in config.py is present but invalid. Using default model.")
+            logger.warning("llm_model in config.py is present but invalid. Using default model.")
     else:
         logger.info("No custom llm_model in config.py. Using default model.")
 
